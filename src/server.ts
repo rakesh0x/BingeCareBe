@@ -1,113 +1,173 @@
 import { Server } from 'socket.io';
 import { createServer } from 'http';
+import { randomBytes } from 'crypto';
 
 const httpServer = createServer();
 const io = new Server(httpServer, {
     cors: {
-        origin: "*",
-        credentials: true,
-        methods: ["GET", "POST"]
+        origin: "*" 
     }
 });
 
+interface Message {
+    id: string;
+    content: string;
+    senderId: string;
+    sender: string;
+    timestamp: Date;
+}
+
+interface Room {
+    users: Set<string>;
+    messages: Message[];
+}
+
 const users = new Map();
-const rooms = new Map();
+const rooms = new Map<string, Room>(); 
 
 io.on('connection', (socket) => {
-    const username = socket.handshake.query.username;
+    console.log("A user connected:", socket.id);
 
-    if (username) {
-        users.set(socket.id, username);
-        socket.broadcast.emit("userJoined", username);
-        io.emit("users", Array.from(users.values()));
-        console.log(`${username} joined the chat`);
-    }
+    socket.on("join", ({ data }) => {
+        try {
+            const parsedData = JSON.parse(data);
+            const roomCode = parsedData.roomId;
 
-    socket.on("join", (roomname) => {
-        if (!rooms.has(roomname)) {
-            socket.emit("error", "Room doesn't exist");
-            return;
+            if (!rooms.has(roomCode)) {
+                socket.emit("error", { message: "Room does not exist"});
+                return;
+            }
+
+            const room = rooms.get(roomCode);
+            if (!room) {
+                socket.emit("error", { message: "Room not found" });
+                return;
+            }
+            
+            socket.join(roomCode);
+            room.users.add(socket.id);
+
+            socket.to(roomCode).emit("joined-room", {
+                roomCode,
+                messages: room.messages 
+            });
+
+
+            console.log(`User ${socket.id} joined room ${roomCode}`);
+        } catch (error) {
+            console.error("Error in join event:", error);
+            socket.emit("error", { message: "Invalid data format" });
         }
-
-        socket.join(roomname);
-        rooms.get(roomname).add(socket.id);
-
-        socket.to(roomname).emit("userJoined", {
-            room: roomname,
-            user: users.get(socket.id)
-        });
-
-        const RoomMembers = Array.from(rooms.get(roomname))
-            .map(id => users.get(id))
-            .filter(Boolean);
-
-        socket.emit("roomUsers", { room: roomname, users: RoomMembers });
     });
 
-    socket.on("create", (roomname) => {
-        if (rooms.has(roomname)) {
-            socket.emit("error", "Room already exists");
-            return;
-        }
+    // Create a new room
+    socket.on("create", ({ roomname}) => {
+        try {
+            let roomCode;
+            do {
+                roomCode = randomBytes(3).toString('hex').toUpperCase();
+            } while (rooms.has(roomCode))
 
-        rooms.set(roomname, new Set([socket.id]));
-        socket.join(roomname);
-        socket.emit("roomCreated", roomname);
-        io.emit("roomList", Array.from(rooms.keys()));
+            console.log("Generated Room Code:", roomCode);
+
+            rooms.set(roomCode, {
+                users: new Set([socket.id]),
+                messages: []
+            });
+
+            socket.join(roomCode);
+            console.log("Room created successfully:", roomCode);
+
+            socket.emit("roomCreated", {
+                roomCode,   
+                socketId: socket.id,
+                roomname
+            });
+        } catch (error) {
+            console.error("Error in create event:", error);
+            socket.emit("error", { message: "Failed to create room" });
+        }
     });
 
     socket.on("getRooms", () => {
         socket.emit("roomList", Array.from(rooms.keys()));
     });
 
-    socket.on("roomMessage", ({ room, message }) => {
-        if (!rooms.has(room)) {
-            socket.emit("error", "Room doesn't exist");
-            return;
-        }
-
-        if (!rooms.get(room).has(socket.id)) {
-            socket.emit("error", "You're not in the room");
-            return;
-        }
-
-        io.to(room).emit("roomMessage", {
-            room,
-            message,
-            sender: users.get(socket.id),
-            timeStamp: new Date()
-        });
-    });
-
-    socket.on("leaveRoom", (roomname) => {
-        if (rooms.has(roomname)) {
-            rooms.get(roomname).delete(socket.id);
-            socket.leave(roomname);
-
-            if (rooms.get(roomname).size === 0) {
-                rooms.delete(roomname);
-                io.emit("roomList", Array.from(rooms.keys()));
-            } else {
-                socket.to(roomname).emit("userLeftRoom", {
-                    room: roomname,
-                    user: users.get(socket.id)
-                });
+    socket.on("roomMessage", ({ roomCode, message }) => {
+        try {
+            const room = rooms.get(roomCode);
+            if (!room) {
+                socket.emit("error", { message: "Room does not exist" });
+                return;
             }
+
+            const messageData: Message = {
+                id: randomBytes(4).toString('hex'),
+                content: message,
+                senderId: socket.id,
+                sender: users.get(socket.id)?.name || 'Anonymous',
+                timestamp: new Date()
+            };
+
+            room.messages.push(messageData);
+            io.to(roomCode).emit("roomMessage", { messageData });
+
+            console.log(`Message sent to room ${roomCode}:`, messageData);
+        } catch (error) {
+            console.error("Error in roomMessage event:", error);
+            socket.emit("error", { message: "Failed to send message" });
         }
     });
 
-    socket.on("disconnect", () => {
-        const user = users.get(socket.id);
-        if (user) {
-            rooms.forEach((members, roomname) => {
-                members.delete(socket.id);
-                if (members.size === 0) {
-                    rooms.delete(roomname);
-                    io.emit("roomList", Array.from(rooms.keys()));
+    // Leave a room
+    socket.on("leaveRoom", (roomCode) => {
+        try {
+            if (rooms.has(roomCode)) {
+                const room = rooms.get(roomCode);
+                if (!room) {
+                    socket.emit("error", { message: "Room not found" });
+                    return;
                 }
-            });
-            users.delete(socket.id);
-            socket.broadcast.emit("userLeft", user);
+                room.users.delete(socket.id);
+                socket.leave(roomCode);
+
+                if (room.users.size === 0) {
+                    rooms.delete(roomCode);
+                    io.emit("roomList", Array.from(rooms.keys()));
+                } else {
+                    socket.to(roomCode).emit("userLeftRoom", {
+                        room: roomCode,
+                        user: users.get(socket.id)
+                    });
+                }
+
+                console.log(`User ${socket.id} left room ${roomCode}`);
+            }
+        } catch (error) {
+            console.error("Error in leaveRoom event:", error);
+            socket.emit("error", { message: "Failed to leave room" });
+        }
+    });
+
+    // Handle user disconnect
+    socket.on("disconnect", () => {
+        try {
+            const user = users.get(socket.id);
+            if (user) {
+                rooms.forEach((room, roomCode) => {
+                    room.users.delete(socket.id);
+                    if (room.users.size === 0) {
+                        rooms.delete(roomCode);
+                        io.emit("roomList", Array.from(rooms.keys()));
+                    }
+                });
+                users.delete(socket.id);
+                socket.broadcast.emit("userLeft", user);
+            }
+
+            console.log("A user disconnected:", socket.id);
+        } catch (error) {
+            console.error("Error in disconnect event:", error);
         }
     });
 });
