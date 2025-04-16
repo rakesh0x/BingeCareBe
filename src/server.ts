@@ -19,28 +19,38 @@ interface Message {
 
 interface Room {
     users: Set<string>;
-    messages: Message[];
+    newMessages: Message[];
 }
 
 const users = new Map();
 const rooms = new Map<string, Room>(); 
 
 io.on('connection', (socket) => {
-    console.log("A user connected:", socket.id);
 
-    socket.on("join", ({ data }) => {
+    socket.on("join", (data) => {
+        console.log("Join event received data:", data);
+        console.log("Join event received data type:", typeof data);
+        console.log("Join event received data value:", JSON.stringify(data));
+        console.log("A user connected:", socket.id);
         try {
-            const parsedData = JSON.parse(data);
-            const roomCode = parsedData.roomId;
-
+            const roomCode = data.roomId;
+            console.log("Extracted roomCode:", roomCode);
+            
+            if (!roomCode) {
+                console.log("Room code is undefined or empty");
+                socket.emit("error", { message: "Room code is required"});
+                return;
+            }
+            
             if (!rooms.has(roomCode)) {
+                console.log("Room does not exist:", roomCode);
                 socket.emit("error", { message: "Room does not exist"});
                 return;
             }
 
             const room = rooms.get(roomCode);
             if (!room) {
-                socket.emit("error", { message: "Room not found" });
+                socket.emit("error", { newMessage: "Room not found" });
                 return;
             }
             
@@ -49,7 +59,7 @@ io.on('connection', (socket) => {
 
             socket.to(roomCode).emit("joined-room", {
                 roomCode,
-                messages: room.messages 
+                messages: room.newMessages 
             });
 
 
@@ -72,7 +82,7 @@ io.on('connection', (socket) => {
 
             rooms.set(roomCode, {
                 users: new Set([socket.id]),
-                messages: []
+                newMessages: []
             });
 
             socket.join(roomCode);
@@ -109,7 +119,7 @@ io.on('connection', (socket) => {
                 timestamp: new Date()
             };
 
-            room.messages.push(messageData);
+            room.newMessages.push(messageData);
             io.to(roomCode).emit("roomMessage", { messageData });
 
             console.log(`Message sent to room ${roomCode}:`, messageData);

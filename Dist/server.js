@@ -9,29 +9,27 @@ const io = new socket_io_1.Server(httpServer, {
         origin: "*"
     }
 });
-const users = new Map(); 
-const rooms = new Map(); 
-io.on('connect', (socket) => {
-    console.log("A user connected:", socket.id);
-
+const users = new Map();
+const rooms = new Map();
+io.on('connection', (socket) => {
     socket.on("join", ({ data }) => {
+        console.log("A user connected:", socket.id);
         try {
-            const parsedData = JSON.parse(data);
-            const roomCode = parsedData.roomId;
+            const roomCode = data.roomId;
             if (!rooms.has(roomCode)) {
                 socket.emit("error", { message: "Room does not exist" });
                 return;
             }
             const room = rooms.get(roomCode);
             if (!room) {
-                socket.emit("error", { message: "Room not found" });
+                socket.emit("error", { newMessage: "Room not found" });
                 return;
             }
             socket.join(roomCode);
             room.users.add(socket.id);
             socket.to(roomCode).emit("joined-room", {
                 roomCode,
-                messages: room.messages
+                messages: room.newMessages
             });
             console.log(`User ${socket.id} joined room ${roomCode}`);
         }
@@ -40,8 +38,8 @@ io.on('connect', (socket) => {
             socket.emit("error", { message: "Invalid data format" });
         }
     });
-
-    socket.on("create", () => {
+    // Create a new room
+    socket.on("create", ({ roomname }) => {
         try {
             let roomCode;
             do {
@@ -50,25 +48,24 @@ io.on('connect', (socket) => {
             console.log("Generated Room Code:", roomCode);
             rooms.set(roomCode, {
                 users: new Set([socket.id]),
-                messages: []
+                newMessages: []
             });
             socket.join(roomCode);
             console.log("Room created successfully:", roomCode);
             socket.emit("roomCreated", {
                 roomCode,
-                socketId: socket.id
+                socketId: socket.id,
+                roomname
             });
         }
         catch (error) {
-            console.error("Erro r in create event:", error);
+            console.error("Error in create event:", error);
             socket.emit("error", { message: "Failed to create room" });
         }
     });
-
     socket.on("getRooms", () => {
         socket.emit("roomList", Array.from(rooms.keys()));
     });
-    // Send a message to a room
     socket.on("roomMessage", ({ roomCode, message }) => {
         var _a;
         try {
@@ -84,7 +81,7 @@ io.on('connect', (socket) => {
                 sender: ((_a = users.get(socket.id)) === null || _a === void 0 ? void 0 : _a.name) || 'Anonymous',
                 timestamp: new Date()
             };
-            room.messages.push(messageData);
+            room.newMessages.push(messageData);
             io.to(roomCode).emit("roomMessage", { messageData });
             console.log(`Message sent to room ${roomCode}:`, messageData);
         }
@@ -122,6 +119,7 @@ io.on('connect', (socket) => {
             socket.emit("error", { message: "Failed to leave room" });
         }
     });
+    // Handle user disconnect
     socket.on("disconnect", () => {
         try {
             const user = users.get(socket.id);
